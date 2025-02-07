@@ -1,9 +1,46 @@
-langchain>=0.1.0
-openai>=1.12.0
-python-dotenv>=1.0.0
-requests>=2.31.0
-beautifulsoup4>=4.12.0
-pandas>=2.1.0
-numpy>=1.24.0
-aiohttp>=3.9.0
-tiktoken>=0.5.0
+# Core Web Frameworks
+fastapi==0.109.0
+uvicorn==0.27.0
+
+# Database
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+pgvector==0.2.0
+
+# AI and NLP
+openai==1.12.0
+langchain==0.1.9
+jina==3.23.1
+
+# Messaging and Async
+kafka-python==2.0.2
+redis==5.0.1
+
+# Web Scraping and Extraction
+requests==2.31.0
+beautifulsoup4==4.12.3
+
+# Data Processing
+numpy==1.26.3
+pandas==2.2.1
+
+# Authentication and Security
+python-jose==3.3.0
+passlib==1.7.4
+python-multipart==0.0.9
+
+# Monitoring and Metrics
+prometheus-client==0.20.0
+
+# Development and Testing
+pytest==8.0.0
+httpx==0.27.0
+
+# Deployment
+gunicorn==21.2.0
+
+# Testing
+pytest==8.0.0
+httpx==0.27.0
+requests==2.31.0
+fastapi-testclient==0.2.0
