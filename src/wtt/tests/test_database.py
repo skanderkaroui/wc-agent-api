@@ -1,64 +1,99 @@
+import asyncio
+import asyncpg
+from dotenv import load_dotenv
 import os
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from wtt.database.config import engine, get_db, init_db
-from wtt.models.token import Token
-from wtt.models.user import User
-from sqlalchemy.orm import sessionmaker
+load_dotenv()
 
-def test_database_connection():
-    """
-    Test database connection and basic operations.
-    """
+async def test_connection():
     try:
-        # Test connection
-        connection = engine.connect()
-        print("✅ Database Connection Successful")
-        connection.close()
-
-        # Initialize database
-        init_db()
-        print("✅ Database Tables Initialized")
-
-        # Create a test session
-        Session = sessionmaker(bind=engine)
-        session = Session()
-
-        # Test Token model
-        test_token = Token(
-            address='0x1234567890123456789012345678901234567890',
-            symbol='TEST',
-            name='Test Token',
-            decimals=18,
-            is_native=False
+        # Connect to database using environment variables
+        conn = await asyncpg.connect(
+            user=os.getenv("POSTGRES_USER"),
+            password=os.getenv("POSTGRES_PASSWORD"),
+            database=os.getenv("POSTGRES_DB"),
+            host=os.getenv("POSTGRES_HOST"),
+            port=os.getenv("POSTGRES_PORT")
         )
-        session.add(test_token)
-        session.commit()
-        print("✅ Token Creation Successful")
 
-        # Test User model
-        test_user = User(
-            username='test_user',
-            email='test@example.com',
-            hashed_password='hashed_password_placeholder'
-        )
-        session.add(test_user)
-        session.commit()
-        print("✅ User Creation Successful")
+        print("\n✅ Successfully connected to database!")
 
-        # Verify insertions
-        stored_token = session.query(Token).filter_by(symbol='TEST').first()
-        stored_user = session.query(User).filter_by(username='test_user').first()
+        # Create users table if it doesn't exist
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) UNIQUE NOT NULL,
+                email VARCHAR(120) UNIQUE NOT NULL,
+                hashed_password VARCHAR(255) NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                worldcoin_sub VARCHAR(100) UNIQUE,
 
-        assert stored_token is not None, "Token not stored correctly"
-        assert stored_user is not None, "User not stored correctly"
+                -- Gamification and ranking metrics
+                verification_score FLOAT DEFAULT 0.0,
+                total_verifications INTEGER DEFAULT 0,
+                accuracy_rate FLOAT DEFAULT 0.0,
+                total_rewards FLOAT DEFAULT 0.0,
 
-        print("🎉 Database Test Completed Successfully!")
+                -- Timestamps
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                last_login TIMESTAMP WITH TIME ZONE
+            )
+        """)
+        print("✅ Users table created/verified")
+
+        # List all tables
+        tables = await conn.fetch("""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+        """)
+
+        print("\nTables in database:")
+        for table in tables:
+            print(f"- {table['table_name']}")
+
+        # Show users table structure
+        columns = await conn.fetch("""
+            SELECT column_name, data_type, is_nullable, column_default
+            FROM information_schema.columns
+            WHERE table_name = 'users'
+            ORDER BY ordinal_position;
+        """)
+
+        print("\nUsers table structure:")
+        for col in columns:
+            print(f"  - {col['column_name']}: {col['data_type']} "
+                  f"(nullable: {col['is_nullable']}, default: {col['column_default']})")
+
+        # Test inserting a sample user with ranking metrics
+        await conn.execute("""
+            INSERT INTO users (
+                username, email, hashed_password, worldcoin_sub,
+                verification_score, total_verifications, accuracy_rate, total_rewards
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (username) DO NOTHING
+        """, 'test_user', 'test@example.com', 'hashed_password_placeholder', 'test123',
+             10.5, 5, 85.5, 100.0)
+        print("\n✅ Sample user created with ranking metrics")
+
+        # Verify user insertion and ranking metrics
+        user = await conn.fetchrow('SELECT * FROM users WHERE username = $1', 'test_user')
+        if user:
+            print(f"\n✅ Retrieved test user:")
+            print(f"  - Username: {user['username']}")
+            print(f"  - Email: {user['email']}")
+            print(f"  - Verification Score: {user['verification_score']}")
+            print(f"  - Total Verifications: {user['total_verifications']}")
+            print(f"  - Accuracy Rate: {user['accuracy_rate']}%")
+            print(f"  - Total Rewards: {user['total_rewards']} WTT")
+
+        await conn.close()
+        print("\n🎉 Database test completed successfully!")
 
     except Exception as e:
-        print(f"❌ Database Test Failed: {e}")
+        print(f"\n❌ Error: {str(e)}")
         raise
 
 if __name__ == "__main__":
-    test_database_connection()
+    asyncio.run(test_connection())

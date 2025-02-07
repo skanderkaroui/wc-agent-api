@@ -2,21 +2,20 @@ import os
 import logging
 from typing import Dict, List, Optional, Any
 
-import requests
-from bs4 import BeautifulSoup
+from jina import Client, Document, DocumentArray
 from langchain.chat_models import ChatOpenAI
 from langchain.prompts import PromptTemplate
-from langchain.schema import HumanMessage
 
 from ..database.config import db_session
 from ..models.token import Token
 
 class SearchExtractionAgent:
-    def __init__(self, openai_api_key: Optional[str] = None):
+    def __init__(self, openai_api_key: Optional[str] = None, jina_host: str = "grpc://localhost:51001"):
         """
-        Initialize the Search Extraction Agent with OpenAI configuration.
+        Initialize the Search Extraction Agent with OpenAI and Jina configuration.
 
         :param openai_api_key: Optional API key for OpenAI. If not provided, uses environment variable.
+        :param jina_host: Jina server host address
         """
         self.openai_api_key = openai_api_key or os.getenv('OPENAI_API_KEY')
         self.llm = ChatOpenAI(
@@ -24,6 +23,7 @@ class SearchExtractionAgent:
             model_name='gpt-4o',
             temperature=0.2
         )
+        self.jina_client = Client(host=jina_host)
         self.logger = logging.getLogger(__name__)
         logging.basicConfig(level=logging.INFO)
 
@@ -47,7 +47,7 @@ class SearchExtractionAgent:
         query = self.llm.predict(query_prompt.format(token_name=token_name))
         return query.strip()
 
-    def web_extract(self, query: str, max_results: int = 3) -> List[Dict[str, str]]:
+    async def web_extract(self, query: str, max_results: int = 3) -> List[Dict[str, str]]:
         """
         Extract web information using Jina search.
 
@@ -56,15 +56,29 @@ class SearchExtractionAgent:
         :return: List of extracted web page information
         """
         try:
-            # Note: Replace with actual Jina API call when available
-            results = []
-            # Placeholder for Jina web extraction
-            return results
+            # Create a Document with the search query
+            doc = Document(text=query)
+
+            # Use Jina's client to search
+            results = await self.jina_client.post('/search', inputs=DocumentArray([doc]), parameters={'limit': max_results})
+
+            # Process results
+            extracted_data = []
+            for match in results[0].matches:
+                extracted_data.append({
+                    'url': match.tags.get('url', ''),
+                    'title': match.tags.get('title', ''),
+                    'content': match.text,
+                    'score': float(match.scores['cosine'].value)
+                })
+
+            return extracted_data
+
         except Exception as e:
             self.logger.error(f"Web extraction error: {e}")
             return []
 
-    def process_token_data(self, token: Token) -> Dict[str, Any]:
+    async def process_token_data(self, token: Token) -> Dict[str, Any]:
         """
         Process and enrich token data through web extraction and AI analysis.
 
@@ -72,7 +86,7 @@ class SearchExtractionAgent:
         :return: Enriched token information
         """
         search_query = self.generate_search_query(token.name)
-        web_results = self.web_extract(search_query)
+        web_results = await self.web_extract(search_query)
 
         # Analyze and extract key information
         enrichment_prompt = PromptTemplate(
