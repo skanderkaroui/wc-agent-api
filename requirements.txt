@@ -1,6 +1,6 @@
 # Core Web Frameworks
 fastapi>=0.109.0
-uvicorn>=0.23.1,<0.24.0  # Pin uvicorn for Jina compatibility
+uvicorn>=0.23.1,<0.24.0  # Pin uvicorn for compatibility
 
 # Database
 sqlalchemy==2.0.25
@@ -10,9 +10,9 @@ pgvector==0.2.0
 # AI and NLP
 openai==1.12.0
 langchain==0.1.9
-jina==3.23.1
+tavily-python==0.3.0
 
-# OpenTelemetry - Pin specific versions for Jina compatibility
+# OpenTelemetry
 opentelemetry-api==1.19.0
 opentelemetry-sdk==1.19.0
 opentelemetry-instrumentation-fastapi==0.40b0
@@ -50,5 +50,4 @@ gunicorn==21.2.0
 # Utilities
 python-dotenv==1.0.0
 aiohttp>=3.9.1
-
 asyncpg==0.30.0

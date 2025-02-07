@@ -1,75 +1,113 @@
 import os
 import logging
 from typing import Dict, List, Optional, Any
+from datetime import datetime
 
-from jina import Client, Document, DocumentArray
 from langchain.chat_models import ChatOpenAI
 from langchain.prompts import PromptTemplate
+from pydantic import BaseModel, Field
 
 from ..database.config import db_session
 from ..models.token import Token
 
+class TavilyQuery(BaseModel):
+    query: str = Field(description="web search query")
+    topic: str = Field(description="type of search, should be 'general' or 'news'")
+    days: int = Field(description="number of days back to run 'news' search")
+    domains: Optional[List[str]] = Field(default=None, description="list of domains to include in the research")
+
 class SearchExtractionAgent:
-    def __init__(self, openai_api_key: Optional[str] = None, jina_host: str = "grpc://localhost:51001"):
+    def __init__(self, openai_api_key: Optional[str] = None, tavily_api_key: Optional[str] = None):
         """
-        Initialize the Search Extraction Agent with OpenAI and Jina configuration.
+        Initialize the Search Extraction Agent with OpenAI and Tavily configuration.
 
         :param openai_api_key: Optional API key for OpenAI. If not provided, uses environment variable.
-        :param jina_host: Jina server host address
+        :param tavily_api_key: Optional API key for Tavily. If not provided, uses environment variable.
         """
         self.openai_api_key = openai_api_key or os.getenv('OPENAI_API_KEY')
+        self.tavily_api_key = tavily_api_key or os.getenv('TAVILY_API_KEY')
         self.llm = ChatOpenAI(
             openai_api_key=self.openai_api_key,
             model_name='gpt-4o',
             temperature=0.2
         )
-        self.jina_client = Client(host=jina_host)
         self.logger = logging.getLogger(__name__)
         logging.basicConfig(level=logging.INFO)
 
-    def generate_search_query(self, token_name: str) -> str:
+    def generate_search_query(self, token_name: str) -> TavilyQuery:
         """
         Generate an optimized search query for a given token.
 
         :param token_name: Name of the token to search
-        :return: Refined search query
+        :return: TavilyQuery object with search parameters
         """
         query_prompt = PromptTemplate(
             input_variables=['token_name'],
             template="""
             Generate a precise web search query to find comprehensive information about the cryptocurrency token: {token_name}.
             The query should help extract details about its origin, purpose, technology, and current status.
+            Consider whether this is a publicly traded token that would be featured in news.
 
             Suggested Query:
             """
         )
 
-        query = self.llm.predict(query_prompt.format(token_name=token_name))
-        return query.strip()
+        query_text = self.llm.predict(query_prompt.format(token_name=token_name))
 
-    async def web_extract(self, query: str, max_results: int = 3) -> List[Dict[str, str]]:
+        # Determine if token is likely to be in news
+        is_news = "news" if self._is_newsworthy_token(token_name) else "general"
+
+        return TavilyQuery(
+            query=query_text.strip(),
+            topic=is_news,
+            days=7 if is_news == "news" else 30,
+            domains=None  # Can be customized based on token type
+        )
+
+    def _is_newsworthy_token(self, token_name: str) -> bool:
         """
-        Extract web information using Jina search.
+        Determine if a token is likely to be featured in news.
+        """
+        newsworthy_prompt = PromptTemplate(
+            input_variables=['token_name'],
+            template="Is {token_name} a publicly traded or major cryptocurrency token that would be frequently featured in mainstream news? Answer only yes or no."
+        )
+        response = self.llm.predict(newsworthy_prompt.format(token_name=token_name))
+        return response.lower().strip() == "yes"
 
-        :param query: Search query
+    async def web_extract(self, query: TavilyQuery, max_results: int = 3) -> List[Dict[str, str]]:
+        """
+        Extract web information using Tavily search.
+
+        :param query: TavilyQuery object with search parameters
         :param max_results: Maximum number of results to retrieve
         :return: List of extracted web page information
         """
         try:
-            # Create a Document with the search query
-            doc = Document(text=query)
+            # Construct query with date for the most recent results
+            query_with_date = f"{query.query} {datetime.now().strftime('%m-%Y')}"
 
-            # Use Jina's client to search
-            results = await self.jina_client.post('/search', inputs=DocumentArray([doc]), parameters={'limit': max_results})
+            # Initialize Tavily client
+            from tavily import TavilyClient
+            tavily_client = TavilyClient(api_key=self.tavily_api_key)
 
-            # Process results
+            # Perform search
+            response = await tavily_client.search(
+                query=query_with_date,
+                topic=query.topic,
+                days=query.days,
+                max_results=max_results,
+                include_domains=query.domains if query.domains else None
+            )
+
+            # Process and format results
             extracted_data = []
-            for match in results[0].matches:
+            for result in response['results']:
                 extracted_data.append({
-                    'url': match.tags.get('url', ''),
-                    'title': match.tags.get('title', ''),
-                    'content': match.text,
-                    'score': float(match.scores['cosine'].value)
+                    'url': result.get('url', ''),
+                    'title': result.get('title', ''),
+                    'content': result.get('content', ''),
+                    'score': result.get('relevance_score', 0.0)
                 })
 
             return extracted_data
