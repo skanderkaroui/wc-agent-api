@@ -12,7 +12,7 @@ from ..agents.ranking_agent import UserRankingAgent
 
 # Initialize FastAPI application
 app = FastAPI(
-    title="World Token Tracker (WTT)",
+    title=os.getenv('APP_TITLE', "World Token Tracker (WTT)"),
     description="AI-powered token verification platform",
     version="0.1.0"
 )

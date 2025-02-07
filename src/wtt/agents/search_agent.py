@@ -3,12 +3,23 @@ import logging
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
-from langchain.chat_models import ChatOpenAI
-from langchain.prompts import PromptTemplate
+import nltk
+from nltk.tokenize import word_tokenize, sent_tokenize
+from nltk.corpus import stopwords
+from langchain_community.chat_models import ChatOpenAI
+from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, Field
 
 from ..database.config import db_session
 from ..models.token import Token
+
+# Download required NLTK data
+try:
+    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    nltk.download('punkt')
+    nltk.download('stopwords')
 
 class TavilyQuery(BaseModel):
     query: str = Field(description="web search query")
@@ -33,6 +44,67 @@ class SearchExtractionAgent:
         )
         self.logger = logging.getLogger(__name__)
         logging.basicConfig(level=logging.INFO)
+        self.stop_words = set(stopwords.words('english'))
+
+    def count_tokens(self, text: str) -> int:
+        """
+        Estimate token count using NLTK's word tokenizer.
+        This is a rough approximation of GPT tokens.
+
+        :param text: Text to count tokens for
+        :return: Estimated token count
+        """
+        # Split into sentences first for better handling of punctuation
+        sentences = sent_tokenize(text)
+        token_count = 0
+
+        for sentence in sentences:
+            # Tokenize each sentence
+            tokens = word_tokenize(sentence)
+            # Add number of tokens plus some overhead for special tokens
+            token_count += len(tokens) + 1  # +1 for potential special tokens
+
+        return token_count
+
+    def truncate_text(self, text: str, max_tokens: int = 4000) -> str:
+        """
+        Truncate text to stay within token limits using NLTK tokenization.
+
+        :param text: Text to truncate
+        :param max_tokens: Maximum number of tokens allowed
+        :return: Truncated text
+        """
+        if self.count_tokens(text) <= max_tokens:
+            return text
+
+        sentences = sent_tokenize(text)
+        truncated_sentences = []
+        current_tokens = 0
+
+        for sentence in sentences:
+            sentence_tokens = self.count_tokens(sentence)
+            if current_tokens + sentence_tokens > max_tokens:
+                break
+            truncated_sentences.append(sentence)
+            current_tokens += sentence_tokens
+
+        return ' '.join(truncated_sentences)
+
+    def preprocess_text(self, text: str) -> str:
+        """
+        Preprocess text using NLTK for better search results.
+
+        :param text: Input text to process
+        :return: Processed text
+        """
+        # Tokenize text
+        tokens = word_tokenize(text.lower())
+
+        # Remove stopwords and non-alphabetic tokens
+        tokens = [token for token in tokens if token.isalpha() and token not in self.stop_words]
+
+        # Join tokens back into text
+        return ' '.join(tokens)
 
     def generate_search_query(self, token_name: str) -> TavilyQuery:
         """
@@ -41,18 +113,28 @@ class SearchExtractionAgent:
         :param token_name: Name of the token to search
         :return: TavilyQuery object with search parameters
         """
+        # Preprocess token name
+        processed_name = self.preprocess_text(token_name)
+
         query_prompt = PromptTemplate(
-            input_variables=['token_name'],
+            input_variables=['token_name', 'processed_name'],
             template="""
             Generate a precise web search query to find comprehensive information about the cryptocurrency token: {token_name}.
             The query should help extract details about its origin, purpose, technology, and current status.
             Consider whether this is a publicly traded token that would be featured in news.
 
+            Processed token name for reference: {processed_name}
+
             Suggested Query:
             """
         )
 
-        query_text = self.llm.predict(query_prompt.format(token_name=token_name))
+        query_text = self.llm.predict(
+            query_prompt.format(
+                token_name=token_name,
+                processed_name=processed_name
+            )
+        )
 
         # Determine if token is likely to be in news
         is_news = "news" if self._is_newsworthy_token(token_name) else "general"
@@ -68,11 +150,19 @@ class SearchExtractionAgent:
         """
         Determine if a token is likely to be featured in news.
         """
+        # Preprocess token name
+        processed_name = self.preprocess_text(token_name)
+
         newsworthy_prompt = PromptTemplate(
-            input_variables=['token_name'],
-            template="Is {token_name} a publicly traded or major cryptocurrency token that would be frequently featured in mainstream news? Answer only yes or no."
+            input_variables=['token_name', 'processed_name'],
+            template="Is {token_name} (processed: {processed_name}) a publicly traded or major cryptocurrency token that would be frequently featured in mainstream news? Answer only yes or no."
         )
-        response = self.llm.predict(newsworthy_prompt.format(token_name=token_name))
+        response = self.llm.predict(
+            newsworthy_prompt.format(
+                token_name=token_name,
+                processed_name=processed_name
+            )
+        )
         return response.lower().strip() == "yes"
 
     async def web_extract(self, query: TavilyQuery, max_results: int = 3) -> List[Dict[str, str]]:
@@ -87,13 +177,16 @@ class SearchExtractionAgent:
             # Construct query with date for the most recent results
             query_with_date = f"{query.query} {datetime.now().strftime('%m-%Y')}"
 
+            # Preprocess query for better results
+            processed_query = self.preprocess_text(query_with_date)
+
             # Initialize Tavily client
             from tavily import TavilyClient
             tavily_client = TavilyClient(api_key=self.tavily_api_key)
 
-            # Perform search
+            # Perform search with processed query
             response = await tavily_client.search(
-                query=query_with_date,
+                query=processed_query,
                 topic=query.topic,
                 days=query.days,
                 max_results=max_results,
@@ -103,10 +196,15 @@ class SearchExtractionAgent:
             # Process and format results
             extracted_data = []
             for result in response['results']:
+                # Process content for better analysis
+                content = result.get('content', '')
+                processed_content = self.preprocess_text(content)
+
                 extracted_data.append({
                     'url': result.get('url', ''),
                     'title': result.get('title', ''),
-                    'content': result.get('content', ''),
+                    'content': content,
+                    'processed_content': processed_content,
                     'score': result.get('relevance_score', 0.0)
                 })
 
@@ -126,6 +224,18 @@ class SearchExtractionAgent:
         search_query = self.generate_search_query(token.name)
         web_results = await self.web_extract(search_query)
 
+        # Process web results for analysis
+        processed_results = []
+        for result in web_results:
+            # Truncate and process content to stay within token limits
+            truncated_content = self.truncate_text(result['content'])
+            processed_content = self.preprocess_text(truncated_content)
+            processed_results.append({
+                **result,
+                'content': truncated_content,
+                'processed_content': processed_content
+            })
+
         # Analyze and extract key information
         enrichment_prompt = PromptTemplate(
             input_variables=['token_name', 'web_results'],
@@ -143,10 +253,14 @@ class SearchExtractionAgent:
             """
         )
 
+        # Ensure prompt stays within token limits
+        web_results_str = str(processed_results)
+        truncated_results = self.truncate_text(web_results_str)
+
         enrichment_result = self.llm.predict(
             enrichment_prompt.format(
                 token_name=token.name,
-                web_results=str(web_results)
+                web_results=truncated_results
             )
         )
 

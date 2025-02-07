@@ -2,8 +2,8 @@ import os
 import logging
 from typing import Dict, List, Optional
 
-from langchain.chat_models import ChatOpenAI
-from langchain.prompts import PromptTemplate
+from langchain_community.chat_models import ChatOpenAI
+from langchain_core.prompts import PromptTemplate
 
 from ..models.token import Token
 
