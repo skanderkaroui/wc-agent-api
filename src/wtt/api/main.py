@@ -1,14 +1,23 @@
 import os
+# Import logging au début
+import logging
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from ..database.config import get_db, init_db
 from ..models.token import Token
 from ..models.user import User
 from ..agents.search_agent import SearchExtractionAgent
-from ..agents.question_agent import QuestionGenerationAgent
-from ..agents.ranking_agent import UserRankingAgent
+
+# Configure logging AVANT toute utilisation
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("wtt_api")  # Donner un nom spécifique au logger
 
 # Initialize FastAPI application
 app = FastAPI(
@@ -20,46 +29,57 @@ app = FastAPI(
 # CORS Configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Initialize database tables on startup
 @app.on_event("startup")
-def startup_event():
-    init_db()
+async def startup_event():
+    """Initialize database on startup"""
+    try:
+        await init_db()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        raise
 
-# Token Verification Endpoints
 @app.get("/tokens/verify/{token_id}")
-async def verify_token(token_id: int, db: Session = Depends(get_db)):
-    """
-    Initiate token verification process for a specific token.
-    """
-    token = db.query(Token).filter(Token.id == token_id).first()
+async def verify_token(token_id: int, db: AsyncSession = Depends(get_db)):
+    """Verify token endpoint"""
+    try:
+        logger.info(f"Processing verification request for token_id: {token_id}")
+        
+        # Récupérer uniquement le nom du token
+        query = select(Token.name).where(Token.id == token_id)
+        result = await db.execute(query)
+        token_name = result.scalar_one_or_none()
 
-    if not token:
-        raise HTTPException(status_code=404, detail="Token not found")
+        if not token_name:
+            logger.warning(f"Token with id {token_id} not found")
+            raise HTTPException(status_code=404, detail="Token not found")
 
-    # Initialize agents
-    search_agent = SearchExtractionAgent()
-    question_agent = QuestionGenerationAgent()
+        logger.info(f"Found token name: {token_name}")
 
-    # Process token data
-    token_context = search_agent.process_token_data(token)
+        # Initialiser le search agent et obtenir les informations
+        search_agent = SearchExtractionAgent()
+        token_information = await search_agent.process_token_data(token_name)
 
-    # Generate verification questions
-    questions = question_agent.process_token_questions(token, token_context)
+        logger.info(f"Successfully processed token {token_id}")
+        return {
+            "token_name": token_name,
+            "information": token_information
+        }
 
-    return {
-        "token": {
-            "id": token.id,
-            "name": token.name,
-            "symbol": token.symbol
-        },
-        "verification_questions": questions
-    }
+    except Exception as e:
+        logger.error(f"Error processing token {token_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
 
 @app.post("/tokens/answer")
 async def submit_token_verification(
