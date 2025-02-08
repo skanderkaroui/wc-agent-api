@@ -1,6 +1,7 @@
 import os
 # Import logging au début
 import logging
+import asyncio
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
@@ -166,27 +167,33 @@ async def health_check():
         "version": "0.1.0"
     }
 
+
+
+# Configuration du logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class TokenResearchRequest(BaseModel):
+    token_name: str = Field(..., description="Name of the token to research")
+    search_depth: str = Field(default="advanced", description="Depth of search")
+
 @app.post("/research/token")
 async def research_token(request: TokenResearchRequest):
-    """
-    Research information about a specific token using Tavily search.
-    Returns comprehensive information from multiple sources.
-    """
     try:
         logger.info(f"Starting research for token: {request.token_name}")
-
-        # Generate search queries for different aspects
+        
+        # Multiple search queries for different aspects
         queries = [
-            f"{request.token_name} blockchain platform technical details",
-            f"{request.token_name} official website documentation",
-            f"{request.token_name} market analysis {datetime.now().strftime('%Y-%m')}"
+            f"{request.token_name} cryptocurrency blockchain technical details",
+            f"{request.token_name} token price market analysis {datetime.now().strftime('%Y-%m')}",
+            f"{request.token_name} official documentation whitepaper",
+            f"{request.token_name} latest news developments {datetime.now().strftime('%Y-%m-%d')}"
         ]
 
-        # Execute searches concurrently
-        results = []
-        for query in queries:
+        # Execute searches - Modified to be synchronous
+        def execute_search(query: str):
             try:
-                search_result = await tavily_client.search(
+                return tavily_client.search(
                     query=query,
                     search_depth=request.search_depth,
                     max_results=5,
@@ -194,39 +201,47 @@ async def research_token(request: TokenResearchRequest):
                     include_raw_content=True,
                     include_images=False
                 )
-                results.append({
-                    "query": query,
-                    "answer": search_result.get("answer", ""),
-                    "sources": [
-                        {
-                            "title": r.get("title", ""),
-                            "url": r.get("url", ""),
-                            "content": r.get("content", ""),
-                            "score": r.get("relevance_score", 0)
-                        }
-                        for r in search_result.get("results", [])
-                    ]
-                })
             except Exception as e:
-                logger.error(f"Error in search query '{query}': {str(e)}")
-                continue
+                logger.error(f"Search error for query '{query}': {str(e)}")
+                return None
 
-        # Structure the response
+        # Run searches in thread pool
+        loop = asyncio.get_running_loop()
+        tasks = []
+        for query in queries:
+            task = loop.run_in_executor(None, execute_search, query)
+            tasks.append(task)
+        
+        # Wait for all searches to complete
+        search_results = await asyncio.gather(*tasks)
+        
+        # Process and combine results
+        combined_results = []
+        for result in search_results:
+            if result and isinstance(result, dict) and 'results' in result:
+                for item in result['results']:
+                    if item not in combined_results:
+                        combined_results.append({
+                            "title": item.get("title", ""),
+                            "url": item.get("url", ""),
+                            "content": item.get("content", ""),
+                            "score": item.get("relevance_score", 0)
+                        })
+
         research_summary = {
             "token_name": request.token_name,
             "timestamp": datetime.now().isoformat(),
-            "research_results": results,
-            "sources_count": sum(len(r["sources"]) for r in results)
+            "research_results": combined_results,
+            "sources_count": len(combined_results)
         }
 
-        logger.info(f"Completed research for {request.token_name} with {research_summary['sources_count']} sources")
+        logger.info(f"Completed research with {len(combined_results)} results")
         return research_summary
 
     except Exception as e:
         error_msg = f"Error researching token {request.token_name}: {str(e)}"
         logger.error(error_msg)
         raise HTTPException(status_code=500, detail=error_msg)
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
