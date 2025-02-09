@@ -1,10 +1,9 @@
 import os
-# Import logging au début
 import logging
 import asyncio
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 import asyncpg
 from dotenv import load_dotenv
@@ -13,8 +12,9 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 from tavily import TavilyClient
 
-from ..database.config import get_db, init_db
+from ..database.config import get_db, init_db, engine
 from ..models.token import Token
+from ..models.token_extracted_data import TokenExtractedData
 from ..models.user import User
 from ..agents.search_agent import SearchExtractionAgent
 from ..agents.ranking_agent import UserRankingAgent
@@ -54,27 +54,19 @@ class TokenResearchRequest(BaseModel):
 
 @app.on_event("startup")
 async def startup_event():
-    """Test database connection on startup"""
+    """Test database connection on startup and initialize database"""
     try:
-        # Test database connection
-        conn = await asyncpg.connect(
-            user=os.getenv("POSTGRES_USER"),
-            password=os.getenv("POSTGRES_PASSWORD"),
-            database=os.getenv("POSTGRES_DB"),
-            host=os.getenv("POSTGRES_HOST"),
-            port=os.getenv("POSTGRES_PORT")
-        )
-
-        # Simple connection test
-        await conn.execute('SELECT 1')
-        logger.info("Successfully connected to the database!")
+        # Initialize database tables
+        await init_db()
+        
+        # Test database connection using SQLAlchemy engine
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+            logger.info("Successfully connected to the database!")
 
     except Exception as e:
         logger.error(f"Database connection failed: {e}")
         raise
-    finally:
-        # Ensure the connection is closed
-        await conn.close()
 
 @app.get("/tokens/verify/{token_id}")
 async def verify_token(token_id: int, db: AsyncSession = Depends(get_db)):
@@ -167,8 +159,6 @@ async def health_check():
         "version": "0.1.0"
     }
 
-
-
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -178,70 +168,68 @@ class TokenResearchRequest(BaseModel):
     search_depth: str = Field(default="advanced", description="Depth of search")
 
 @app.post("/research/token")
-async def research_token(request: TokenResearchRequest):
+async def research_token(
+    request: TokenResearchRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """Research a token and store the results"""
     try:
         logger.info(f"Starting research for token: {request.token_name}")
         
-        # Multiple search queries for different aspects
-        queries = [
-            f"{request.token_name} cryptocurrency blockchain technical details",
-            f"{request.token_name} token price market analysis {datetime.now().strftime('%Y-%m')}",
-            f"{request.token_name} official documentation whitepaper",
-            f"{request.token_name} latest news developments {datetime.now().strftime('%Y-%m-%d')}"
-        ]
-
-        # Execute searches - Modified to be synchronous
-        def execute_search(query: str):
+        # Initialize search agent with retry logic
+        search_agent = SearchExtractionAgent()
+        max_retries = 3
+        retry_delay = 1  # seconds
+        
+        for attempt in range(max_retries):
             try:
-                return tavily_client.search(
-                    query=query,
-                    search_depth=request.search_depth,
-                    max_results=5,
-                    include_answer=True,
-                    include_raw_content=True,
-                    include_images=False
+                # Attempt to process token data
+                token_information = await search_agent.process_token_data(request.token_name)
+                
+                # If successful, store the results
+                token = Token(name=request.token_name)
+                db.add(token)
+                await db.commit()
+                await db.refresh(token)
+                
+                extracted_data = TokenExtractedData(
+                    token_id=token.id,
+                    token_name=request.token_name,
+                    research_results=token_information
                 )
+                db.add(extracted_data)
+                await db.commit()
+                
+                return {
+                    "status": "success",
+                    "token_id": token.id,
+                    "research_results": token_information
+                }
+                
             except Exception as e:
-                logger.error(f"Search error for query '{query}': {str(e)}")
-                return None
-
-        # Run searches in thread pool
-        loop = asyncio.get_running_loop()
-        tasks = []
-        for query in queries:
-            task = loop.run_in_executor(None, execute_search, query)
-            tasks.append(task)
-        
-        # Wait for all searches to complete
-        search_results = await asyncio.gather(*tasks)
-        
-        # Process and combine results
-        combined_results = []
-        for result in search_results:
-            if result and isinstance(result, dict) and 'results' in result:
-                for item in result['results']:
-                    if item not in combined_results:
-                        combined_results.append({
-                            "title": item.get("title", ""),
-                            "url": item.get("url", ""),
-                            "content": item.get("content", ""),
-                            "score": item.get("relevance_score", 0)
-                        })
-
-        research_summary = {
-            "token_name": request.token_name,
-            "timestamp": datetime.now().isoformat(),
-            "research_results": combined_results,
-            "sources_count": len(combined_results)
-        }
-
-        logger.info(f"Completed research with {len(combined_results)} results")
-        return research_summary
-
+                if attempt == max_retries - 1:  # Last attempt
+                    logger.error(f"Error researching token {request.token_name}: {str(e)}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to research token after {max_retries} attempts: {str(e)}"
+                    )
+                else:
+                    logger.warning(f"Attempt {attempt + 1} failed, retrying in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                    
     except Exception as e:
-        error_msg = f"Error researching token {request.token_name}: {str(e)}"
-        logger.error(error_msg)
-        raise HTTPException(status_code=500, detail=error_msg)
+        logger.error(f"Error processing token research request: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
+    
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

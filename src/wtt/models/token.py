@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Numeric, Boolean, DateTime, func
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from datetime import datetime
 
 Base = declarative_base()
@@ -27,6 +27,9 @@ class Token(Base):
     is_native: Mapped[bool] = mapped_column(Boolean, default=False)
     app_id: Mapped[str] = mapped_column(String, nullable=True)
     humans: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Add this new line for the relationship
+    extracted_data = relationship("TokenExtractedData", back_populates="token")
 
     def __repr__(self):
         return f"<Token(name='{self.name}', symbol='{self.symbol}', address='{self.address}')>"
