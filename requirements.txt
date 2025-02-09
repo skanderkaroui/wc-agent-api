@@ -1,12 +1,20 @@
+# Database
 asyncpg==0.30.0
+SQLAlchemy==2.0.38
+pgvector==0.3.6
+greenlet==3.0.3  # Required for async SQLAlchemy
+
+# Web Framework
 fastapi==0.115.8
+uvicorn==0.34.0
 httpx==0.28.1
+
+# LangChain
 langchain_community==0.3.17
 langchain_core==0.3.34
-pgvector==0.3.6
+
+# Utils
 pydantic==2.10.6
 python-dotenv==1.0.1
 setuptools==75.8.0
-SQLAlchemy==2.0.38
-uvicorn==0.34.0
-tavily-python
+tavily-python==0.3.1
